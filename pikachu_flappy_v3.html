@@ -1,0 +1,231 @@
+
+<style>
+  #gameWrap { display: flex; flex-direction: column; align-items: center; padding: 1rem 0; font-family: var(--font-sans); }
+  #gameCanvas { border: 2px solid var(--color-border-primary); border-radius: var(--border-radius-lg); cursor: pointer; display: block; max-width: 100%; }
+  #ui { display: flex; gap: 24px; margin-bottom: 12px; align-items: center; }
+  #scoreBox { font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
+  #bestBox { font-size: 14px; color: var(--color-text-secondary); }
+  #msg { font-size: 13px; color: var(--color-text-secondary); margin-top: 8px; }
+</style>
+<div id="gameWrap">
+  <h2 class="sr-only">피카퓨 점프 게임(제작:ehdWHr,claude)</h2>
+  <div id="ui">
+    <div id="scoreBox">점수: <span id="score">0</span></div>
+    <div id="bestBox">최고: <span id="best">0</span></div>
+  </div>
+  <canvas id="gameCanvas" width="720" height="480"></canvas>
+  <div id="msg">스페이스바 또는 클릭으로 시작 / 점프</div>
+</div>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const msgEl = document.getElementById('msg');
+const W = canvas.width, H = canvas.height;
+const GAP = 150, PIPE_W = 56, PIPE_SPEED = 2.6;
+const GRAVITY = 0.40, JUMP_FORCE = -7.2;
+const MIN_PIPE_DIST = 260, PIPE_INTERVAL = 110;
+let pika, pipes, score, best = 0, state, raf;
+let tick = 0, pipeTimer = 0, flashTimer = 0, showFlash = false;
+
+function initGame() {
+  pika = { x: 120, y: H/2, vy: 0, w: 32, h: 32 };
+  pipes = []; score = 0; state = 'idle';
+  scoreEl.textContent = 0;
+  msgEl.textContent = '스페이스바 또는 클릭으로 시작 / 점프';
+  cancelAnimationFrame(raf);
+  tick = 0; pipeTimer = 0; flashTimer = 0; showFlash = false;
+  loop();
+}
+
+function spawnPipe() {
+  if (pipes.length > 0 && pipes[pipes.length-1].x > W - MIN_PIPE_DIST) return;
+  const minTop = 70, maxTop = H - GAP - 70;
+  const topH = Math.floor(Math.random()*(maxTop-minTop+1))+minTop;
+  pipes.push({ x: W+10, topH, passed: false });
+}
+
+function jump() {
+  if (state === 'dead') { initGame(); return; }
+  if (state === 'idle') { state = 'playing'; msgEl.textContent = '스페이스바 또는 클릭으로 점프'; spawnPipe(); }
+  pika.vy = JUMP_FORCE;
+}
+
+function drawBg() {
+  // 하늘 그라데이션 느낌 — 위쪽 진한 파랑, 아래 연한 하늘색
+  const sky = ctx.createLinearGradient(0,0,0,H-48);
+  sky.addColorStop(0, '#4FC3F7');
+  sky.addColorStop(1, '#B3E5FC');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0,0,W,H-48);
+  // 산 실루엣
+  ctx.fillStyle = '#81C784';
+  ctx.beginPath();
+  ctx.moveTo(0, H-48);
+  ctx.lineTo(60, H-130); ctx.lineTo(130, H-80);
+  ctx.lineTo(200, H-160); ctx.lineTo(290, H-90);
+  ctx.lineTo(380, H-175); ctx.lineTo(460, H-100);
+  ctx.lineTo(540, H-155); ctx.lineTo(620, H-95);
+  ctx.lineTo(720, H-140); ctx.lineTo(720, H-48);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#66BB6A';
+  ctx.beginPath();
+  ctx.moveTo(0,H-48);
+  ctx.lineTo(80,H-105); ctx.lineTo(160,H-70);
+  ctx.lineTo(250,H-120); ctx.lineTo(340,H-75);
+  ctx.lineTo(440,H-115); ctx.lineTo(530,H-72);
+  ctx.lineTo(640,H-108); ctx.lineTo(720,H-78);
+  ctx.lineTo(720,H-48); ctx.closePath(); ctx.fill();
+  // 땅
+  ctx.fillStyle = '#43A047';
+  ctx.fillRect(0,H-48,W,48);
+  ctx.fillStyle = '#388E3C';
+  ctx.fillRect(0,H-50,W,6);
+}
+
+function drawClouds(t) {
+  const clouds = [
+    [60,45,38,0.22],[180,32,28,0.15],[320,50,42,0.28],
+    [470,38,32,0.19],[610,44,36,0.24]
+  ];
+  clouds.forEach(([bx,by,r,spd]) => {
+    const x = ((bx - (t*spd)%W) + W*3) % W;
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.beginPath(); ctx.ellipse(x, by, r, r*0.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+r*0.6, by+r*0.15, r*0.65, r*0.4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x-r*0.55, by+r*0.15, r*0.55, r*0.36, 0, 0, Math.PI*2); ctx.fill();
+    // 구름 하단 그림자
+    ctx.fillStyle = 'rgba(200,230,255,0.5)';
+    ctx.beginPath(); ctx.ellipse(x, by+r*0.28, r*0.8, r*0.22, 0, 0, Math.PI*2); ctx.fill();
+  });
+}
+
+function drawPipe(pipe) {
+  const capH = 22;
+  // 파이프 몸통
+  const g1 = ctx.createLinearGradient(pipe.x, 0, pipe.x+PIPE_W, 0);
+  g1.addColorStop(0,'#388E3C'); g1.addColorStop(0.4,'#66BB6A'); g1.addColorStop(1,'#2E7D32');
+  ctx.fillStyle = g1;
+  ctx.beginPath(); ctx.roundRect(pipe.x, 0, PIPE_W, pipe.topH-capH, [0,0,3,3]); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(pipe.x, pipe.topH+GAP+capH, PIPE_W, H-pipe.topH-GAP-capH-48, [3,3,0,0]); ctx.fill();
+  // 캡
+  const g2 = ctx.createLinearGradient(pipe.x-7, 0, pipe.x+PIPE_W+7, 0);
+  g2.addColorStop(0,'#2E7D32'); g2.addColorStop(0.4,'#4CAF50'); g2.addColorStop(1,'#1B5E20');
+  ctx.fillStyle = g2;
+  ctx.beginPath(); ctx.roundRect(pipe.x-7, pipe.topH-capH, PIPE_W+14, capH, [4,4,4,4]); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(pipe.x-7, pipe.topH+GAP, PIPE_W+14, capH, [4,4,4,4]); ctx.fill();
+  // 하이라이트
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(pipe.x+5, 0, 8, pipe.topH-capH);
+  ctx.fillRect(pipe.x+5, pipe.topH+GAP+capH, 8, H);
+}
+
+function drawPika(p, t) {
+  const bob = state === 'dead' ? 0 : Math.sin(t*0.08)*1.2;
+  const tilt = Math.max(-28, Math.min(22, p.vy*3));
+  ctx.save();
+  ctx.translate(p.x+p.w/2, p.y+p.h/2+bob);
+  ctx.rotate(tilt*Math.PI/180);
+  const hw = p.w/2, hh = p.h/2;
+  // 꼬리 (뒤쪽)
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath();
+  ctx.moveTo(-hw+2, hh-4);
+  ctx.quadraticCurveTo(-hw-10, hh+8, -hw-4, hh+14);
+  ctx.quadraticCurveTo(-hw+2, hh+8, hw-4, hh+2);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#E6A800'; ctx.lineWidth = 0.8; ctx.stroke();
+  // 몸통
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.ellipse(0, 2, hw, hh, 0, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#E6A800'; ctx.lineWidth = 0.7; ctx.stroke();
+  // 귀
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.ellipse(-hw+3, -hh, 5, 11, -0.25, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(hw-3, -hh, 5, 11, 0.25, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.ellipse(-hw+3, -hh+2, 3, 7, -0.2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(hw-3, -hh+2, 3, 7, 0.2, 0, Math.PI*2); ctx.fill();
+  // 눈
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(-6, -1, 3.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6, -1, 3.5, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-5, -2.5, 1.3, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7, -2.5, 1.3, 0, Math.PI*2); ctx.fill();
+  // 코
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.ellipse(0, 2.5, 2, 1.5, 0, 0, Math.PI*2); ctx.fill();
+  // 입
+  ctx.strokeStyle = '#cc3333'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(0, 4, 3, 0.1, Math.PI-0.1); ctx.stroke();
+  // 뺨
+  ctx.fillStyle = 'rgba(255,100,50,0.65)';
+  ctx.beginPath(); ctx.ellipse(-hw+4, 4, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(hw-4, 4, 6, 4, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawOverlay(txt, sub) {
+  ctx.fillStyle = 'rgba(0,0,0,0.42)';
+  ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#fff';
+  ctx.font = '500 30px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(txt, W/2, H/2-22);
+  if (sub) {
+    ctx.font = '400 16px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+    ctx.fillText(sub, W/2, H/2+18);
+  }
+  ctx.textAlign = 'left';
+}
+
+function loop() {
+  tick++;
+  ctx.clearRect(0,0,W,H);
+  drawBg();
+  drawClouds(tick);
+  if (state==='playing'||state==='dead') for (let p of pipes) drawPipe(p);
+  drawPika(pika, tick);
+
+  if (showFlash) {
+    ctx.fillStyle = 'rgba(255,220,0,0.22)';
+    ctx.fillRect(0,0,W,H);
+    if (--flashTimer<=0) showFlash=false;
+  }
+
+  if (state==='playing') {
+    pika.vy += GRAVITY;
+    pika.y += pika.vy;
+    pipeTimer++;
+    if (pipeTimer>=PIPE_INTERVAL) { spawnPipe(); pipeTimer=0; }
+    for (let i=pipes.length-1;i>=0;i--) {
+      pipes[i].x -= PIPE_SPEED;
+      if (!pipes[i].passed && pipes[i].x+PIPE_W < pika.x) {
+        pipes[i].passed=true; score++;
+        scoreEl.textContent=score;
+        if (score>best) { best=score; bestEl.textContent=best; }
+        showFlash=true; flashTimer=7;
+      }
+      if (pipes[i].x+PIPE_W<0) pipes.splice(i,1);
+    }
+    if (pika.y+pika.h>H-48||pika.y<0) { state='dead'; msgEl.textContent='다시 클릭하거나 스페이스바를 누르세요'; }
+    for (let p of pipes) {
+      if (pika.x+pika.w-6>p.x+5 && pika.x+6<p.x+PIPE_W-5) {
+        if (pika.y+6<p.topH||pika.y+pika.h-6>p.topH+GAP) { state='dead'; msgEl.textContent='다시 클릭하거나 스페이스바를 누르세요'; }
+      }
+    }
+  }
+
+  if (state==='idle') drawOverlay(' 피카퓨 점프!','스페이스바 또는 클릭으로 시작');
+  if (state==='dead') drawOverlay(`게임 오버!  점수: ${score}`,'다시 하려면 클릭 또는 스페이스바');
+  raf = requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown', e=>{ if(e.code==='Space'){e.preventDefault();jump();} });
+canvas.addEventListener('click', jump);
+canvas.addEventListener('touchstart', e=>{ e.preventDefault(); jump(); },{passive:false});
+initGame();
+</script>
